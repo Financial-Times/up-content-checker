@@ -5,7 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"github.com/Financial-Times/up-checker/util"
+	"github.com/Financial-Times/up-content-checker/util"
 	xmlpath "gopkg.in/xmlpath.v2"
 	"log"
 	"net/http"
@@ -13,7 +13,9 @@ import (
 )
 
 type (
-	checker struct{}
+	checker struct {
+		client *http.Client
+	}
 
 	Identifier struct {
 		Authority       string `json:authority`
@@ -52,7 +54,6 @@ type (
 )
 
 var (
-	Checker                 checker
 	ErrCouldNotFetchContent = errors.New("Could not fetch content")
 	contentUrl              string
 	xpath                   = xmlpath.MustCompile("//ft-content[@type=\"http://www.ft.com/ontology/content/ImageSet\"]/@url")
@@ -62,6 +63,12 @@ func init() {
 	flag.StringVar(&contentUrl, "content", "http://api.ft.com/content", "Content read endpoint URL")
 }
 
+func NewChecker(client *http.Client) util.Checker {
+	c := &checker{client}
+
+	return c
+}
+
 func (c checker) Check(uuid string) ([][]string, error) {
 	log.Printf("Check UUID: %s", uuid)
 
@@ -69,7 +76,7 @@ func (c checker) Check(uuid string) ([][]string, error) {
 		result [][]string
 	)
 
-	content, err := fetchContent(uuid)
+	content, err := c.fetchContent(uuid)
 	if err != nil {
 		log.Printf("Unable to fetch content", err)
 
@@ -85,7 +92,7 @@ func (c checker) Check(uuid string) ([][]string, error) {
 	//	log.Printf("UUID: %s image sets: %s", uuid, imageSets)
 
 	for _, imageSetUuid := range imageSets {
-		imageSet, err := fetchContent(imageSetUuid)
+		imageSet, err := c.fetchContent(imageSetUuid)
 		if err != nil {
 			result = append(result, []string{uuid, imageSetUuid})
 			continue
@@ -94,7 +101,7 @@ func (c checker) Check(uuid string) ([][]string, error) {
 		for _, imageSetMember := range imageSet.Members {
 			imageModelUuid, found := util.ExtractUuid(imageSetMember.Id)
 			if found {
-				row := checkImageModel(uuid, imageSet.Id, imageModelUuid)
+				row := c.checkImageModel(uuid, imageSet.Id, imageModelUuid)
 				if len(row) > 0 {
 					result = append(result, row)
 				}
@@ -105,10 +112,16 @@ func (c checker) Check(uuid string) ([][]string, error) {
 	return result, nil
 }
 
-func fetchContent(uuid string) (*Content, error) {
+func (c checker) fetchContent(uuid string) (*Content, error) {
 	var content Content
 
-	resp, err := http.Get(fmt.Sprintf("%s/%s", contentUrl, uuid))
+	url := fmt.Sprintf("%s/%s", contentUrl, uuid)
+
+	req, _ := http.NewRequest("GET", url, nil)
+	util.AddBasicAuthentication(req)
+
+	resp, err := c.client.Do(req)
+	//	resp, err := http.Get(fmt.Sprintf("%s/%s", contentUrl, uuid))
 	if err != nil {
 		log.Print(err)
 		return nil, err
@@ -160,8 +173,8 @@ func listImageSets(content *Content) ([]string, error) {
 	return imageSets, nil
 }
 
-func checkImageModel(uuid string, imageSetUuid string, imageModelUuid string) []string {
-	imageModel, err := fetchContent(imageModelUuid)
+func (c checker) checkImageModel(uuid string, imageSetUuid string, imageModelUuid string) []string {
+	imageModel, err := c.fetchContent(imageModelUuid)
 	if err != nil {
 		return []string{uuid, imageSetUuid, imageModelUuid}
 	}

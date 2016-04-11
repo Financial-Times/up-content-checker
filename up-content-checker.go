@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"github.com/Financial-Times/up-checker/imagechecker"
-	"github.com/Financial-Times/up-checker/util"
+	"github.com/Financial-Times/up-content-checker/imagechecker"
+	"github.com/Financial-Times/up-content-checker/util"
 	"log"
 	"net/http"
 	"os"
@@ -17,10 +17,6 @@ import (
 )
 
 type (
-	Checker interface {
-		Check(uuid string) ([][]string, error)
-	}
-
 	Notification struct {
 		Type         string `json:type`
 		Id           string `json:id`
@@ -48,11 +44,12 @@ var (
 	uuidMatcher      = regexp.MustCompile(".*/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$")
 	sinceMatcher     = regexp.MustCompile("https?://.*[?&]since=([^&]+).*")
 	wg               sync.WaitGroup
-	checkers         []Checker
+	checkers         []util.Checker
 	earliest         string
 	notificationsUrl string
-	uuids            string
-	out              *csv.Writer
+	uuids  string
+	client *http.Client
+	out    *csv.Writer
 )
 
 func init() {
@@ -69,7 +66,9 @@ func main() {
 		log.Printf("UUIDs: %s", uuids)
 	}
 
-	checkers = append(checkers, imagechecker.Checker)
+	client = &http.Client{}
+
+	checkers = append(checkers, imagechecker.NewChecker(client))
 
 	f, _ := os.Create("up-content-check.csv")
 	out = csv.NewWriter(f)
@@ -193,7 +192,12 @@ func checker(uuids chan []string, checker chan string) {
 }
 
 func fetchPage(since string) (*[]Notification, string, error) {
-	resp, err := http.Get(fmt.Sprintf("%s?since=%s", notificationsUrl, since))
+	url := fmt.Sprintf("%s?since=%s", notificationsUrl, since)
+
+	req, _ := http.NewRequest("GET", url, nil)
+	util.AddBasicAuthentication(req)
+
+	resp, err := client.Do(req)
 	if err != nil {
 		log.Println(err)
 		return nil, "", err
