@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"github.com/Financial-Times/up-content-checker/imagechecker"
 	"github.com/Financial-Times/up-content-checker/util"
+	"io"
+	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
@@ -47,9 +49,11 @@ var (
 	checkers         []util.Checker
 	earliest         string
 	notificationsUrl string
-	uuids  string
+	uuids            string
 	client *http.Client
-	out    *csv.Writer
+	out          *csv.Writer
+	articleCount int
+	errorCount   int
 )
 
 func init() {
@@ -61,8 +65,9 @@ func init() {
 func main() {
 	flag.Parse()
 
-	log.Printf("Earliest: %s", earliest)
 	if uuids == "" {
+		log.Printf("Earliest: %s", earliest)
+	} else {
 		log.Printf("UUIDs: %s", uuids)
 	}
 
@@ -82,7 +87,7 @@ func main() {
 		since := getStartDate()
 
 		checkerPoolSize := 5
-		uuidStream := make(chan string, checkerPoolSize)
+		uuidStream := make(chan string, checkerPoolSize - 1)
 		for i := 0; i < checkerPoolSize; i++ {
 			go checkItem(uuidStream)
 			wg.Add(1)
@@ -129,6 +134,7 @@ func main() {
 	}
 
 	wg.Wait()
+	log.Printf("Processed %d UUIDs, %d had errors", articleCount, errorCount)
 }
 
 func check(uuid string) {
@@ -136,9 +142,13 @@ func check(uuid string) {
 		rows, err := c.Check(uuid)
 		if err != nil {
 			log.Printf("UUID: %s result: %s error: %s", uuid, rows, err)
+			out.Write([]string{uuid, err.Error()})
 		}
 
-		out.WriteAll(rows)
+		if len(rows) > 0 {
+			errorCount++
+			out.WriteAll(rows)
+		}
 	}
 }
 
@@ -192,6 +202,8 @@ func checker(uuids chan []string, checker chan string) {
 }
 
 func fetchPage(since string) (*[]Notification, string, error) {
+	log.Printf("Fetching notifications since: %s", since)
+
 	url := fmt.Sprintf("%s?since=%s", notificationsUrl, since)
 
 	req, _ := http.NewRequest("GET", url, nil)
@@ -203,16 +215,17 @@ func fetchPage(since string) (*[]Notification, string, error) {
 		return nil, "", err
 	}
 
+	defer resp.Body.Close()
+
 	if resp.StatusCode != http.StatusOK {
 		log.Printf("Unexpected HTTP response %d", resp.StatusCode)
 		return nil, "", err
 	}
 
-	defer resp.Body.Close()
-
 	var page NotificationsPage
 
 	err = json.NewDecoder(resp.Body).Decode(&page)
+	io.Copy(ioutil.Discard, resp.Body) // consume everything
 	if err != nil {
 		log.Printf("Unable to deserialize JSON: %s", err)
 		return nil, "", err
@@ -237,7 +250,7 @@ func checkItem(uuids chan string) {
 		if !ok {
 			break
 		}
-
+		articleCount++
 		check(uuid)
 	}
 }

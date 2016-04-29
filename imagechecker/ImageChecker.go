@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"github.com/Financial-Times/up-content-checker/util"
 	xmlpath "gopkg.in/xmlpath.v2"
+	"io"
+	"io/ioutil"
 	"log"
 	"net/http"
 	"strings"
@@ -70,7 +72,7 @@ func NewChecker(client *http.Client) util.Checker {
 }
 
 func (c checker) Check(uuid string) ([][]string, error) {
-	log.Printf("Check UUID: %s", uuid)
+	//	log.Printf("Check UUID: %s", uuid)
 
 	var (
 		result [][]string
@@ -78,14 +80,14 @@ func (c checker) Check(uuid string) ([][]string, error) {
 
 	content, err := c.fetchContent(uuid)
 	if err != nil {
-		log.Printf("Unable to fetch content", err)
+		log.Printf("Unable to fetch content: %s", err.Error())
 
 		return append(result, []string{uuid, err.Error()}), err
 	}
 
 	imageSets, err := listImageSets(content)
 	if err != nil {
-		log.Printf("Unable to parse document", err)
+		log.Printf("Unable to parse document: %s", err.Error())
 		return append(result, []string{uuid, err.Error()}), err
 	}
 
@@ -101,7 +103,7 @@ func (c checker) Check(uuid string) ([][]string, error) {
 		for _, imageSetMember := range imageSet.Members {
 			imageModelUuid, found := util.ExtractUuid(imageSetMember.Id)
 			if found {
-				row := c.checkImageModel(uuid, imageSet.Id, imageModelUuid)
+				row := c.checkImageModel(uuid, imageSetUuid, imageModelUuid)
 				if len(row) > 0 {
 					result = append(result, row)
 				}
@@ -121,20 +123,20 @@ func (c checker) fetchContent(uuid string) (*Content, error) {
 	util.AddBasicAuthentication(req)
 
 	resp, err := c.client.Do(req)
-	//	resp, err := http.Get(fmt.Sprintf("%s/%s", contentUrl, uuid))
 	if err != nil {
-		log.Print(err)
+		log.Printf("Unable to fetch content: %s: %s", url, err.Error())
 		return nil, err
 	}
+
+	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		//		log.Printf("Unexpected HTTP response %d", resp.StatusCode)
 		return nil, ErrCouldNotFetchContent
 	}
 
-	defer resp.Body.Close()
-
 	err = json.NewDecoder(resp.Body).Decode(&content)
+	io.Copy(ioutil.Discard, resp.Body) // consume everything
 	if err != nil {
 		log.Printf("Unable to deserialize JSON: %s", err)
 		return nil, err
@@ -144,11 +146,11 @@ func (c checker) fetchContent(uuid string) (*Content, error) {
 }
 
 func listImageSets(content *Content) ([]string, error) {
-	var imageSets []string
+	imageSets := make(map[string]string)
 
 	mainImage := content.MainImage
 	if mainImageUuid, hasMainImage := util.ExtractUuid(mainImage.Id); hasMainImage {
-		imageSets = append(imageSets, mainImageUuid)
+		imageSets[mainImageUuid] = mainImageUuid
 	}
 
 	doc, err := xmlpath.Parse(strings.NewReader(content.BodyXML))
@@ -166,24 +168,36 @@ func listImageSets(content *Content) ([]string, error) {
 		n := matches.Node()
 		auxImageUuid, found := util.ExtractUuid(n.String())
 		if found {
-			imageSets = append(imageSets, auxImageUuid)
+			imageSets[auxImageUuid] = auxImageUuid
 		}
 	}
 
-	return imageSets, nil
+	var imageSetUuids []string
+	for uuid, _ := range imageSets {
+		imageSetUuids = append(imageSetUuids, uuid)
+	}
+
+	return imageSetUuids, nil
 }
 
 func (c checker) checkImageModel(uuid string, imageSetUuid string, imageModelUuid string) []string {
 	imageModel, err := c.fetchContent(imageModelUuid)
 	if err != nil {
+		log.Printf("Error retrieving image model: %s", err.Error())
 		return []string{uuid, imageSetUuid, imageModelUuid}
 	}
 
 	imageBinaryUrl := imageModel.BinaryUrl
-	resp, err := http.Get(imageBinaryUrl)
+	req, _ := http.NewRequest("GET", imageBinaryUrl, nil)
+
+	resp, err := c.client.Do(req)
+
 	if err != nil {
+		log.Printf("Error retrieving binary: %s", err.Error())
 		return []string{uuid, imageSetUuid, imageModelUuid, imageBinaryUrl}
-	} else if resp.StatusCode != http.StatusOK {
+	}
+
+	if resp.StatusCode != http.StatusOK {
 		return []string{uuid, imageSetUuid, imageModelUuid, imageBinaryUrl}
 	}
 
